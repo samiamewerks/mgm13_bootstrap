@@ -1,0 +1,123 @@
+      Bluetooth chip bootstrap procedure and protocol
+      
+PURPOSE
+
+The bluetooth bootstrap allows the main processor, the WGM160, to pass a program
+code block to the MGM13 chip and that image will be flashed and checked for
+integrity. This allows the initial bring up of an unprogrammed board, or 
+reprogramming of an existing board.
+
+METHOD
+
+The existing SPI packet driver will be used. See the document 
+"bluetooth_protocol.txt". We add a few new protocol commands, both to insure 
+reprogramming is not intentionally executed during normal operation as well
+as to allow a reprogramming operation to be kicked off from normal code.
+The code to be loaded is passed as a series of 1kb code blocks since the 2kb
+transfer limit of the SPI DMA, although a perfect match for the 2kb flash
+miminum page size, is limited to 2045 because of the protocol overhead.
+
+The entire codebase is protected by a 32 bit CRC, the Ethernet CRC. This is a
+well known CRC with plenty of examples. The WMG160 passes the CRC as the final
+part of the boostrap protocol. The 16 bit CCITT code used in the packet driver
+is not considered to be strong enough for the whole packet. The entire program
+is protectd by the 32 bit CRC to cover any drops or other issues with the
+the protocol, even though each 1024b packet is checked by the 16 bit CRC of
+that protocol.
+
+The bootstrap itself exists as a separate program at the top end of the 512kb
+internal flash memory of the MGM13 CPU. It is programmed during manufacture, and
+is never overwritten. It runs the same packet SPI protocol as the main code,
+but using bootstrap specific codes. It gives an error for the normal packet
+transport codes designed to run the bluetooth communications software.
+
+The bootstrap can detect if the main code is resident at the bottom of the 
+flash, and it gives a special status/error code if there is no main code.
+This will persist until a reprogramming cycle is run. The detection of the
+main code being resident is done by storing a 32 bit word in the USERDATA
+area at the top of flash. This is a parameter area set aside for program use.
+
+Since the bootstrap is inserted during manufacturing, and before the main code
+is programmed, the bootstrap will exist alone in the flash in newly manufactured
+units, much as the WGM160 only comes up with the default GECKO OS code loaded,
+which then fetches a complete programmed bundle from WIFI. The WGM160 will be
+programmed, restarted, and then detect that the MGM13 has no resident code. It
+will then pass the MGM13 from within it's own code to bring up the MGM13.
+
+The normal MGM13/bluetooth code contains a running version of the SPI packet
+driver. When it sees the "start of programming" code it will overwrite the
+"code resident" word in the USERDATA area to indicate the main code can no
+longer be trusted, and transfer execution to the bootstrap. The bootstrap will
+not return until it has completed a full and sucessful reprogram operation.
+
+The bootstrap program will not attempt to keep the original image as a fallback,
+because the WGM160 can detect it is not running and retry the reprogram 
+procedure.
+
+We leave it up to the main bluetooth code to present it's version number to the
+WGM160, and then the main software may kick off a reprogram cycle to bring it
+up to date.
+
+New SPI packet commands (note that the originals are 1-4):
+
+1: 05: Start reprogram sequence
+2-3: 00's to pad out command
+4-5: 16 bit CRC
+
+This causes the main program to invalidate the main program and enter the
+bootstrap, or the bootstrap to start a reprogram cycle.
+
+1: 06: Pass program data
+2-n:   1024 bytes of program data (padded as required).
+n+1-n+2: 16 bit CRC
+
+1: 07: Execute program
+2-5:   32 bit CRC of whole program
+6-n:   00's to pad out 1024 bytes
+n+1-n+2: 16 bit CRC
+
+Notes:
+
+1. The 05 command uses the standard 5 byte length format of the SPI driver.
+It branches off the 01 command in the state diagram.
+
+2. After starting the reprogram sequence, all further packets are expected to be
+1024+3=1027 (1kb+overhead) long.
+
+3. Each packet received is programmed to flash sequentially from the first flash
+location.
+
+4. After the 06 or "start reprogram sequence", the master waits until it 
+receives and IRQ, then it sends the 06 or 07 packet. The slave sets the speed
+of the reprogram process.
+
+5. The 07 or "execute program" sequence also uses 1024 bytes, but includes the
+32 bit CRC. It must be the same length as a data packet because that is what
+the slave exepects. The slave will take a different path in the state diagram
+for this.
+
+6. For all cases, the SPI slave (in this case the bootstrap) must be ready to
+transfer the next packet with the exact number of bytes required. This is
+either 5 bytes or 1024+3=1027. The response is mostly ignored except for the
+command and CRC bytes, which should check, IE., the CRC should be valid.
+
+Errors
+
+Besides the "I am halted" error or 0xff[1] from the slave, we define a few new 
+ones:
+
+0xfe: Signifies that no main program is resident.
+0xfd: Signifies that the last reprogram sequence failed (CRC didn't match).
+
+If the reprogram sequence succeeds, then the packet protocol will start with 
+the usual 1 - 2 length-packet sequence. The master should wait after sending
+the 07 command for a period of time to let the MGM13 come up. Alternately, the
+bluetooth code can send a packet to the master to indicate it is up. This
+operation uses an IRQ and so will alert the master.
+
+In any case, the master CPU should be ready to see an 0xfd code or 0xfe code
+when running the SPI packet protocol, and be ready to retry a reprogram 
+operation, or alternately, declare the MGM13 dead after (say) too many retries.
+
+ [1] It happens to be the same code received if the slave does not respond at
+ all.

@@ -1,0 +1,243 @@
+      WIFI master processor to bluetooth chip communications protocol
+      
+PURPOSE
+
+This document describes the protocol used over the master to slave SPI 
+connection between the WIFI processor and the bluetooth processor.
+
+CONDITIONS
+
+1. The protocol must match the characteristics of SPI communication,
+specifically, the master must specify the length of all transfers, even when the
+transfer is from the slave back to the master. If necessary, the slave will be
+queried as to the length of data it has to transfer to the master first, before
+the transfer so that the master knows how much data to read back from the slave.
+
+2. A doorbell signal in the form of a CPU to CPU interrupt from slave to master.
+This will simply be used to set off a read from master to slave, anytime the
+slave has asyncronous data for the master.
+
+3. The basic job of the protocol is to tunnel data packets to and from the
+bluetooth client, the phone or other device on the other side of the 
+communication.
+
+4. Only one bluetooth connected device is active at a time.
+
+IMPLEMENTATION
+
+A basic message from master to slave or slave to master is of the format:
+
+1: Command byte, 0-255 value of the command to process.
+2-n: Data bytes
+n+1: 16 bit CRC
+
+Because all communications on the SPI consist of a transmit with simultaineous
+receive, the master forms all command bytes. The slave simply sends the same
+command byte back to the master as a way to check the command and response 
+match.
+
+The commands and their associated data are:
+
+Master to slave
+
+1: 01:   Send length of next data packet, master to slave.
+2-3:     16 bit length of packet data
+4-5:     16 bit CRC
+
+1: 02:   Pass data packet, master to slave.
+2-n:     Contents of data to be passed to bluetooth connection.
+n+1-n+2: 16 bit CRC
+
+1: 03:   Send length of slave to master data packet.
+2-3:     00's to clock length back to master
+4-5:     16 bit CRC
+
+1: 04:   Retrieve slave data packet.
+2-n:     00's to mark clock time, in length of slave data, including CRC
+
+Slave to master
+
+1: 01:   Retrieve master to slave data length
+2-3:     00's for length
+4-5:     16 bit CRC
+
+1: 02:   Retrieve master to slave packet.
+2-n:     00's for data packet
+n+1-n+2: 16 bit CRC
+
+1: 03:   Retrieve slave data length
+2-3:     16 bit length of packet data
+4-5:     16 bit CRC
+
+1: 04:   Send data packet to master.
+2-n:     packet data to master.
+n+1:     16 bit CRC.
+
+1: FF: Error reset. A sync or CRC error occurred, reset protocol.
+
+Notes:
+
+1. For any given packet in either direction, the CRC can be calculated and used
+to check the packet. Thus for any packet in either direction, M->S or S->M, the
+CRC is calculated on send and checked on recieve.
+
+2. Command 01 can occur at any time. The slave DMA for transmit and recieve must
+be armed and ready at any time, for at least 5 bytes. The slave can be 
+programmed for more than 5 bytes, but will not recieve an asyncronous completion
+interrupt unless exactly 5 bytes are programmed.
+
+3. Between each and every command, enough time will be given by the master for
+the slave to recover the length from the inbound packet, and to run a 3 byte CRC
+to validate it. If necessary, the master will execute a wait to ensure this.
+
+4. Commands 03 and 04 will only happen after a doorbell interrupt to master.
+
+5. Commands 03 and 04 will occur in the slave to master data directly after
+the same command from the master. This means the data must be ready in the
+buffer before the master sends the command.
+
+6. The slave sends the command byte expected back to the master so
+the master can verify master and slave are sync. This must be in the buffer
+before the transfer operation.
+
+7. In the case of 01, the master ignores the return data. This is required
+to resolve the race condition, see below.
+
+8. The byte order of the 16 bit length and 16 bit CRC is big endian order,
+most significant byte first. This is standard network ordering.
+
+9. The FF or error command/response is not designed to be a retry mechanisim
+or data reliability protocol. After any CRC or sequence error, the slave halts,
+issues an IRQ, and returns FF to any operation. The planned response to any
+error detected by the WIFI master, including any CRC, sequence, or return of
+FF from by the bluetooth, is to issue a reset to the bluetooth, clear any
+state in the WIFI and start again. Additionally, any such error should be
+logged. Inability to transfer data accurately over a few inches implies a
+physical or design fault.
+
+CRC CALCULATION
+
+The CRC calculation is done according to CRC-CCIT-16, a standard CRC 
+calculation, using an 0xFFFF starting point. You can find an online calculator
+for this at:
+
+https://www.lammertbies.nl/comm/info/crc-calculation.html
+
+A 16 bit algoritim was choosen because:
+
+1. It is a compact checkword.
+2. It is fast and easy to calculate.
+3. It is adequate for the short data lengths involved here.
+
+The CRC routine in C is:
+
+unsigned short crc16(const unsigned char* data_p, unsigned char length)
+
+{
+
+    unsigned char x;
+    unsigned short crc = 0xFFFF;
+
+    while (length--){
+
+        x = crc >> 8 ^ *data_p++;
+        x ^= x>>4;
+        crc = (crc << 8) ^ ((unsigned short)(x << 12)) ^ 
+              ((unsigned short)(x <<5)) ^ ((unsigned short)x);
+
+    }
+
+    return crc;
+
+}
+
+PRELOADS AND AVOIDING A 1 to 3 STATE RACE CONDITION
+
+The slave has the ability to alert the master for attention. However, the master
+can only alert the slave to a transfer by simply sending the transfer. The point
+of this is that the slave must leave the DMA's armed for a pending transfer at
+all times, and it stands to reason that this operation cannot be blocking.
+
+The slave must handle a race condition between the 1 and 3 operations, because
+after the IRQ is asserted to the master, you cannot know if the next packet to
+be received is a 1 message (downstream packet) or a 3 message in response to the
+IRQ. Message 3 to message 4 does not have this issue, since 4 is an expected
+response to the 3 message. Similarly, 2 always follows 1.
+
+THEORY OF OPERATION
+
+The slave sets up a "standard transfer" immediately after startup and leaves
+that set up at all times. This setup consists of:
+
+1. A recieve (master to slave) and transmit (slave to master) buffer.
+
+2. DMAs armed and ready with the RX and TX buffers loaded with length 5
+(the architecture of SPI dictates that these lengths are the same).
+
+When a 01 operation is completed from master to slave, a complete 01 packet
+will be found in the receive buffer and the transmit buffer contents ignored.
+This is received and processed regarless of what else is going on in the
+slave. Note that the signaling of the transfer complete is done via async
+interrupt flagging.
+
+When the slave has data for master, it sets up a 02 response in the transmit
+buffer, consisting of the 02 code, a length of the packet to be sent to master,
+and a CRC. When this setup is complete, we flag an IRQ to master and enter a
+wait for the async notification of transfer complete (which may have happened
+during our setup).
+
+At this time, one of two conditions will be true:
+
+1. The recieve buffer will contain a 01 packet, because the master sent that
+packet before it acknowledged the IRQ.
+
+2. The receive buffer will contain a 03 packet, because the IRQ was acknowledged
+and the master sent it to start the 3-4 sequence.
+
+In the first case, we process the inbound 01 packet, then the 02 packet, and 
+then this will be followed by an 03 packet as the master then sees the IRQ.
+
+In the second case, we format the transmit buffer (or switch the DMA addresses)
+to send the needed 03.
+
+The first case will be followed by the second case, so we end up in the same
+case.
+
+ANALYSIS
+
+Most of the transactions between master and slave are sequential and causal.
+The transaction chains are:
+
+1 -> 2 -> end
+
+IRQ -> 3 -> 4 ->end
+
+The race condition comes between 1 and 3, because the master can start the 1
+transfer at any time, even while the slave is setting up its transmit buffer.
+We overlap the 1 and 3 operations, and are able to do that because the master
+either discards the received data from slave if it is issuing a 1, or reads
+and acts on the data if it is processing a 3. As long as we DON'T send a IRQ,
+we know the master cannot be performing a 3 operation, and thus the transmit
+buffer is safe to set up, and would be ignored in any 1 operation pending.
+Then IRQ is sent, and it is ambiguous if we will receive the requested 3 
+operation or catch the end of a 1 operation. If we caught the end of a 1,
+we process that and know a 3 is going to come, or just process the 3
+operation.
+
+OTHER METHODS
+
+The other two methods to resolve the ambiguity in SPI are:
+
+1. Perform all transactions as single bytes.
+
+2. Only allow polling from the master as a means to send data upstream.
+
+Both of these were deemed less efficient than the method described above.
+
+FURTHER EXPANSION OF THE SYSTEM
+
+Obviously only five codes out of 255 possible codes are used (excluding zero).
+If more commands are needed, these can be sent in place of 01 (for master to
+slave), or 03 (slave to master). These are points that the master and slave
+can react to different commands being provided on the bus.
+ 
