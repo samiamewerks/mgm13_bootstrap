@@ -402,11 +402,24 @@ int main(void)
 {
 
 	int r;
+	uint32_t *addr_clw0 = (uint32_t*) 0xfe041e8;
+	uint32_t clear_boot_enable = ~0x2;
 
     /* Initialize device */
     initMcu();
 
     printf("\r\nBluetooth bootstrap program\r\n");
+
+    printf("Configuration lock word: %08lx\r\n", *addr_clw0);
+
+    if (*addr_clw0 == 0xffffffff) {
+
+    	printf("Programming boot bit\r\n");
+        r = MSC_WriteWord(addr_clw0, &clear_boot_enable, 4);
+        if (r) printf("Programming boot enable bit fails\r\n");
+        printf("Configuration lock word after programming: %08lx\r\n", *addr_clw0);
+
+    }
 
     /* Initialize board */
     initBoard();

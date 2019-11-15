@@ -155,6 +155,13 @@ void LESENSE_IRQHandler(void)        __attribute__ ((weak, alias("Default_Handle
 void CRYPTO1_IRQHandler(void)        __attribute__ ((weak, alias("Default_Handler")));
 void TRNG0_IRQHandler(void)          __attribute__ ((weak, alias("Default_Handler")));
 
+extern const tVectorEntry __RVectors[];
+const tVectorEntry        __RVectors[] __attribute__ ((section(".rvectors"))) = {
+  /* Cortex-M Exception Handlers */
+  { .topOfStack = &__StackTop },              /* Initial Stack Pointer */
+  { Reset_Handler             }               /* Reset Handler */
+};
+
 /*----------------------------------------------------------------------------
  * Exception / Interrupt Vector table
  *----------------------------------------------------------------------------*/
