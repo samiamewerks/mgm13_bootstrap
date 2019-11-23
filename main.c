@@ -63,7 +63,7 @@
 #define PROGRAM_MAGIC_LOC (USERDATA_BASE+0)
 
 /* location of main program load */
-#define PROGRAM_LOAD_LOC (0x20000)
+#define PROGRAM_LOAD_LOC (0x800)
 
 #define CMDLEN 5        /* length of standard command */
 #define PKTLEN (2*1024) /* length of max packet + overhead */
@@ -91,6 +91,9 @@ typedef enum {
 
 } spicmd;
 
+typedef void (*vector)(void);
+typedef vector* pvector;
+
 SPIDRV_HandleData_t handleDataSlave;
 SPIDRV_Handle_t handleSlave = &handleDataSlave;
 
@@ -106,6 +109,11 @@ spicmd spistate; /* state of SPI transfers */
 uint8_t* fladdr;
 unsigned long magicval = MAGIC; /* magic value for writing */
 
+/* go address for resident program */
+volatile int goaddr;
+volatile vector savector;
+
+#if 0
 /*******************************************************************************
 
 Dump memory
@@ -129,6 +137,8 @@ void dmpmem(uint8_t* addr, unsigned len)
     printf("\r\n");
 
 }
+#endif
+
 /*******************************************************************************
 
 Calculate 16 bit CRC
@@ -320,24 +330,35 @@ void STransferCB(struct SPIDRV_HandleData *handle,
             GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 1);
         	break;
         case spicmd_mts_pex: /* execute resident program */
+            printf("Program flashed, check CRC: length: %d\r\n",
+            	   fladdr-(uint8_t*)PROGRAM_LOAD_LOC);
         	/* find crc for entire program in flash */
-        	crcl = crc32((unsigned char*)PROGRAM_LOAD_LOC, fladdr-(uint8_t*)PROGRAM_LOAD_LOC);
+        	crcl = crc32((unsigned char*)PROGRAM_LOAD_LOC,
+        			     fladdr-(uint8_t*)PROGRAM_LOAD_LOC);
         	/* get crc from master */
         	rcrcl = pktrxbuf[1] << 24 | pktrxbuf[2] << 16 | pktrxbuf[3] << 8 | pktrxbuf[4];
-        	if (crcl != rcrcl) spistate = spicmd_rsf; /* flag program failure */
-        	else {
+        	if (crcl != rcrcl) {
+
+        		printf("Program fails CRC\r\n");
+        		spistate = spicmd_rsf; /* flag program failure */
+
+        	} else {
 
         		/* place resident magic to indicate programmed */
                 r = MSC_ErasePage((uint32_t*)USERDATA_BASE);
         		if (!r) r = MSC_WriteWord((uint32_t*)USERDATA_BASE, &magicval, sizeof(uint32_t));
-        		if (r) spistate = spicmd_rsf; /* fails */
+        		if (r) {
+
+        			spistate = spicmd_rsf; /* fails */
+        			printf("Unable to program magic number\r\n");
+
+        		}
         		else {
 
             		MSC_Deinit(); /* shut off flash programming */
-printf("Executing program\r\n");
-            		while (1);
+                    printf("Executing resident program\r\n");
             		/* go program */;
-            		((void(*)(void))PROGRAM_LOAD_LOC)();
+            		goaddr = 1;
 
         		}
 
@@ -382,7 +403,6 @@ int spixfr(uint8_t* txbuf, uint8_t* rxbuf, int len)
     unsigned short crc;
     Ecode_t r;
 
-//printf("spixfr: len: %d\r\n", len+2);
     // Start a SPI slave receive transfer.
     crc = crc16(txbuf, len); /* calculate CRC on payload */
     txbuf[len] = crc >> 8; /* place CRC */
@@ -391,6 +411,37 @@ int spixfr(uint8_t* txbuf, uint8_t* rxbuf, int len)
     r = SPIDRV_STransfer(handleSlave, txbuf, rxbuf, len+2, STransferCB, 0);
 
     return (!!r); /* return with error code */
+
+}
+
+/*******************************************************************************
+
+Start resident program
+
+Shuts down the clocks, loads the SP from the vector at 0x800, and then branches
+to the vector at 0x804.
+
+*******************************************************************************/
+
+void start_resident(void)
+
+{
+
+	/* bring the clocks to original state */
+	deinitMcu();
+
+	/* execute the resident program by the vector table */
+	__ASM (
+	    "mov r3,0x800\n\t"
+	    "ldr r4,[r3]\n\t"
+	    "mov sp,r4\n\t"
+	    "add r3,#4\n\t"
+	    "ldr r3,[r3]\n\t"
+	    "bx r3\n\t"
+	);
+
+	/* just for paranoia, this should never execute */
+	while (1);
 
 }
 
@@ -408,7 +459,7 @@ int main(void)
     /* Initialize device */
     initMcu();
 
-    printf("\r\nBluetooth bootstrap program\r\n");
+    printf("\r\nBluetooth bootstrap program vs. 1.0\r\n");
 
     printf("Configuration lock word: %08lx\r\n", *addr_clw0);
 
@@ -442,6 +493,11 @@ int main(void)
     /* open the MSC/flash package */
     MSC_Init();
 
+/* burn this page if you need to not exec the program image */
+#if 0
+    MSC_ErasePage((uint32_t*)USERDATA_BASE);
+#endif
+
     /* set up flash program load address */
     fladdr = (uint8_t*)PROGRAM_LOAD_LOC;
 
@@ -452,17 +508,22 @@ int main(void)
      */
 
     /* check resident program exists */
-    if (*((unsigned long*)USERDATA_BASE) == MAGIC)
-        /* set up to receive a type 5 (start reprogram) command */
-        spistate = spicmd_mts_sps;
-    else
-    	/* set no resident program */
-    	spistate = spicmd_nrp;
+    if (*((unsigned long*)USERDATA_BASE) == MAGIC) {
+
+    	printf("Resident program detected, executing at: %08x", PROGRAM_LOAD_LOC);
+		/* go program */;
+		start_resident();
+
+    }
+
+  	/* set no resident program */
+   	spistate = spicmd_nrp;
     pkttxbuf[0] = spistate;
     r = spixfr(pkttxbuf, pktrxbuf, 3); /* set DMAs to run */
     if (r) spistate = spicmd_err; /* failed, put in error state */
 
     /* halt */
-    while (1);
+    while (!goaddr);
+    start_resident();
 
 }

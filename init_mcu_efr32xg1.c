@@ -164,3 +164,21 @@ static void initMcu_clocks(void)
 #endif
 
 }
+
+/**
+ * Deinitalize MCU
+ *
+ * Perform actions to prepare the clock for reinitialization.
+ * In this case, we reselect the HF oscillator feed to the ring oscillator.
+ * This allows the HF clock to be reinitialized at a later time.
+ */
+void deinitMcu(void)
+
+{
+
+	/* reenable the HF ring oscillator */
+	CMU_OscillatorEnable(cmuOsc_HFRCO, true, true);
+	/* select that as the HF clock */
+	CMU_ClockSelectSet(cmuClock_HF, cmuSelect_HFRCO);
+
+}

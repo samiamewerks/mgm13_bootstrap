@@ -50,6 +50,8 @@ extern "C" {
 
 void initMcu(void);
 
+void deinitMcu(void);
+
 #ifdef __cplusplus
 }
 #endif
