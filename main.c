@@ -49,16 +49,6 @@
 /* SPI driver */
 #include "spidrv.h"
 
-/***********************************************************************************************//**
- * @addtogroup Application
- * @{
- **************************************************************************************************/
-
-/***********************************************************************************************//**
- * @addtogroup app
- * @{
- **************************************************************************************************/
-
 /* location of resident program magic */
 #define PROGRAM_MAGIC_LOC (USERDATA_BASE+0)
 
@@ -72,6 +62,10 @@
 #define MAGIC 0x454e4c58
 
 #define FLSSIZ 1024 /* basic flash packet size */
+
+/* define this if you want to override the startup of a valid resident program
+   based on the presence of the magic number and download a resident program. */
+//#define BURNMAGIC /* define this to burn the magic number */
 
 /* SPI protocol commands */
 typedef enum {
@@ -91,9 +85,6 @@ typedef enum {
 
 } spicmd;
 
-typedef void (*vector)(void);
-typedef vector* pvector;
-
 SPIDRV_HandleData_t handleDataSlave;
 SPIDRV_Handle_t handleSlave = &handleDataSlave;
 
@@ -111,33 +102,6 @@ unsigned long magicval = MAGIC; /* magic value for writing */
 
 /* go address for resident program */
 volatile int goaddr;
-volatile vector savector;
-
-#if 0
-/*******************************************************************************
-
-Dump memory
-
-*******************************************************************************/
-
-void dmpmem(uint8_t* addr, unsigned len)
-
-{
-
-	int i;
-
-    for (i = 0; i < len; i++) {
-
-    	if (!(i%16)) printf("%p: ", addr);
-    	printf("%02x ", *((uint8_t*)addr));
-    	addr++;
-    	if (!((i+1) % 16)) printf("\r\n");
-
-    }
-    printf("\r\n");
-
-}
-#endif
 
 /*******************************************************************************
 
@@ -261,7 +225,6 @@ void STransferCB(struct SPIDRV_HandleData *handle,
     int len = 0;
     int r;
 
-//printf("STransferCB: state: %d incoming: %d\r\n", spistate, pktrxbuf[0]);
     len = 0; /* clear length */
     /* set length and buffer according to state */
     if (spistate == spicmd_mts_gbs || spistate == spicmd_mts_sps) len = 3;
@@ -289,7 +252,6 @@ void STransferCB(struct SPIDRV_HandleData *handle,
        bootstrap. The state is a no-op, but this is allowed */
     if (pktrxbuf[0] == spicmd_mts_gbs && spistate == spicmd_mts_sps)
         	spistate = spicmd_mts_gbs;
-//printf("STransferCB2: state: %d\r\n", spistate);
 
     /* Now run the state machine. Remember, these are the states at the END
        of a transfer! */
@@ -494,7 +456,7 @@ int main(void)
     MSC_Init();
 
 /* burn this page if you need to not exec the program image */
-#if 0
+#ifdef BURNMAGIC
     MSC_ErasePage((uint32_t*)USERDATA_BASE);
 #endif
 
