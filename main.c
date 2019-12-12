@@ -63,6 +63,15 @@
 
 #define FLSSIZ 1024 /* basic flash packet size */
 
+/* GPIO Port A pin for IRQ to master */
+#define IRQPIN 4
+
+/* configuration lock word */
+#define CLW0_ADDR 0xfe041e8
+
+/* base address of bootstrap */
+#define BOOTSTRAP_BASE 0x70000
+
 /* define this if you want to override the startup of a valid resident program
    based on the presence of the magic number and download a resident program. */
 //#define BURNMAGIC /* define this to burn the magic number */
@@ -227,12 +236,17 @@ void STransferCB(struct SPIDRV_HandleData *handle,
 
     len = 0; /* clear length */
     /* set length and buffer according to state */
-    if (spistate == spicmd_mts_gbs || spistate == spicmd_mts_sps) len = 3;
+    if (spistate == spicmd_mts_gbs || spistate == spicmd_mts_sps ||
+        spistate == spicmd_nrp) len = 3;
     else len = FLSSIZ+1;
     crc = crc16(pktrxbuf, len); /* find received CRC */
     rcrc = pktrxbuf[len] << 8 | pktrxbuf[len+1];
-    if (crc != rcrc) /* CRCs don't match */
+    if (crc != rcrc) { /* CRCs don't match */
+
+    	printf("CRC fail: was: %04x s/b: %04x\r\n", crc, rcrc);
     	spistate = spicmd_err;
+
+    }
     if (pktrxbuf[0] < spicmd_mts_len ||
         (pktrxbuf[0] > spicmd_mts_pex && pktrxbuf[0] < spicmd_rsf))
     	spistate = spicmd_err;
@@ -251,7 +265,10 @@ void STransferCB(struct SPIDRV_HandleData *handle,
        state, we got this because master does not know we are already in
        bootstrap. The state is a no-op, but this is allowed */
     if (pktrxbuf[0] == spicmd_mts_gbs && spistate == spicmd_mts_sps)
-        	spistate = spicmd_mts_gbs;
+        spistate = spicmd_mts_gbs;
+
+    if (pktrxbuf[0] != spistate) /* check expected state */
+        spistate = spicmd_err; /* states/commands do not match */
 
     /* Now run the state machine. Remember, these are the states at the END
        of a transfer! */
@@ -275,21 +292,25 @@ void STransferCB(struct SPIDRV_HandleData *handle,
         	r = spixfr(pkttxbuf, pktrxbuf, FLSSIZ+1); /* transfer 1kb */
             if (r) spistate = spicmd_err; /* go to error state */
             /* pulse master IRQ to signal armed and ready */
-            GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 0);
-            GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 1);
+            GPIO_PinModeSet(gpioPortA, IRQPIN, gpioModePushPull, 0);
+            GPIO_PinModeSet(gpioPortA, IRQPIN, gpioModePushPull, 1);
             break;
         /* don't merge these two cases, the compiler does that */
         case spicmd_mts_ppd:
-        	/* pass program data */
-        	program_packet_receive(pktrxbuf+1);
-        	fladdr += FLSSIZ;
-        	spistate = spicmd_mts_ppd; /* go to pass program data */
-        	pkttxbuf[0] = spicmd_mts_ppd;
-            r = spixfr(pkttxbuf, pktrxbuf, FLSSIZ+1); /* transfer 1kb */
-            if (r) spistate = spicmd_err; /* go to error state */
+        	if (fladdr >= (uint8_t*)BOOTSTRAP_BASE) spistate = spicmd_err;
+        	else {
+
+            	/* pass program data */
+        	    program_packet_receive(pktrxbuf+1);
+        	    fladdr += FLSSIZ;
+        	    pkttxbuf[0] = spicmd_mts_ppd;
+                r = spixfr(pkttxbuf, pktrxbuf, FLSSIZ+1); /* transfer 1kb */
+                if (r) spistate = spicmd_err; /* go to error state */
+
+        	}
             /* pulse master IRQ to signal armed and ready */
-            GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 0);
-            GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 1);
+            GPIO_PinModeSet(gpioPortA, IRQPIN, gpioModePushPull, 0);
+            GPIO_PinModeSet(gpioPortA, IRQPIN, gpioModePushPull, 1);
         	break;
         case spicmd_mts_pex: /* execute resident program */
             printf("Program flashed, check CRC: length: %d\r\n",
@@ -415,13 +436,13 @@ int main(void)
 {
 
 	int r;
-	uint32_t *addr_clw0 = (uint32_t*) 0xfe041e8;
+	uint32_t *addr_clw0 = (uint32_t*) CLW0_ADDR;
 	uint32_t clear_boot_enable = ~0x2;
 
     /* Initialize device */
     initMcu();
 
-    printf("\r\nBluetooth bootstrap program vs. 1.0\r\n");
+    printf("\r\nBluetooth bootstrap program vs. 1.1\r\n");
 
     printf("Configuration lock word: %08lx\r\n", *addr_clw0);
 
@@ -440,7 +461,7 @@ int main(void)
     initApp();
 
     /* set IRQ pin to WIFI inactive (low true) */
-    GPIO_PinModeSet(gpioPortA, 4, gpioModePushPull, 1);
+    GPIO_PinModeSet(gpioPortA, IRQPIN, gpioModePushPull, 1);
 
     // SPIDRV_Init_t
     // PC6 - MOSI
@@ -484,7 +505,7 @@ int main(void)
     r = spixfr(pkttxbuf, pktrxbuf, 3); /* set DMAs to run */
     if (r) spistate = spicmd_err; /* failed, put in error state */
 
-    /* halt */
+    /* halt until go command is seen */
     while (!goaddr);
     start_resident();
 
