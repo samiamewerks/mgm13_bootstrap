@@ -264,7 +264,8 @@ void STransferCB(struct SPIDRV_HandleData *handle,
     /* if we are in the "start program state", and master wants "go bootstrap"
        state, we got this because master does not know we are already in
        bootstrap. The state is a no-op, but this is allowed */
-    if (pktrxbuf[0] == spicmd_mts_gbs && spistate == spicmd_mts_sps)
+    if (pktrxbuf[0] == spicmd_mts_gbs &&
+        (spistate == spicmd_mts_sps || spistate == spicmd_nrp))
         spistate = spicmd_mts_gbs;
 
     if (pktrxbuf[0] != spistate) /* check expected state */
@@ -442,7 +443,7 @@ int main(void)
     /* Initialize device */
     initMcu();
 
-    printf("\r\nBluetooth bootstrap program vs. 1.1\r\n");
+    printf("\r\nBluetooth bootstrap program vs. 1.3\r\n");
 
     printf("Configuration lock word: %08lx\r\n", *addr_clw0);
 
