@@ -443,7 +443,7 @@ int main(void)
     /* Initialize device */
     initMcu();
 
-    printf("\r\nBluetooth bootstrap program vs. 1.3\r\n");
+    printf("\r\nBluetooth bootstrap program vs. 1.4\r\n");
 
     printf("Configuration lock word: %08lx\r\n", *addr_clw0);
 
